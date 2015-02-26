@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+
+import sys
+import re
+
+class Event(object):
+    RE_TASK = ".+"
+    RE_PID = "\d+"
+    RE_CPU = "\d{3}"
+    RE_FLAGS = "...."
+    RE_TIMESTAMP = "[\d.]+"
+    RE_FUNCTION = "\w+"
+    RE_DATA = ".*"
+    prog = re.compile("(%s)-(%s) +\[(%s)\] (%s) +(%s): (%s): (%s)" % (RE_TASK,
+        RE_PID, RE_CPU, RE_FLAGS, RE_TIMESTAMP, RE_FUNCTION, RE_DATA))
+
+    def __init__(self, line):
+        m = self.prog.match(line)
+
+        self.task = m.group(1)
+        self.pid = int(m.group(2))
+        self.cpu = int(m.group(3))
+        self.flags = m.group(4)
+        self.timestamp = float(m.group(5)) * 1000.0
+        self.function = m.group(6)
+        self.raw_data = m.group(7)
+        self.d = {}
+
+        parse_table = {
+                "drm_vblank_event:": self._parse_cski,
+                "i915_gem_ring_dispatch": self._parse_cski,
+                "i915_gem_request_add": self._parse_cski,
+                "i915_gem_request_complete": self._parse_cski,
+                "i915_gem_request_retire": self._parse_cski,
+                "i915_gem_request_wait_begin": self._parse_i915_request_wait_begin,
+                "i915_gem_request_wait_end": self._parse_cski,
+                "i915_flip_request": self._parse_i915_flip,
+                "i915_flip_complete": self._parse_i915_flip,
+                "i915_ring_wait_begin": self._parse_cski,
+                "i915_ring_wait_end": self._parse_cski,
+                "intel_gpu_freq_change": self._parse_cski,
+        }
+        if self.function in parse_table:
+            parse_table[self.function]()
+
+    def _parse_cski(self):
+        """Parse comma-separated key-int pairs."""
+        entries = self.raw_data.split(", ")
+        for kv in entries:
+            k, v = kv.split("=", 1)
+            self.d[k] = int(v)
+
+    def _parse_i915_request_wait_begin(self):
+        entries = self.raw_data.split(", ")
+        for kv in entries:
+            k, v = kv.split("=", 1)
+            if k == "blocking":
+                self.d[k] = (v == "no")
+            else:
+                self.d[k] = int(v)
+
+    def _parse_i915_flip(self):
+        """Parse comma-separated key-int pairs."""
+        entries = self.raw_data.split(", ")
+        for kv in entries:
+            k, v = kv.split("=", 1)
+            if k == "obj":
+                self.d[k] = int(v, 16)
+            else:
+                self.d[k] = int(v)
+
+    def __str__(self):
+        return "%s-%d [%d] %s %.6f: %s: %s" % (self.task, self.pid, self.cpu,
+                self.flags, self.timestamp / 1000.0,
+                self.function, self.raw_data)
+
+class GPUView(object):
+    def __init__(self):
+        self.events = []
+        self.ring0_ev = None
+        self.ring0_actives = []
+        self.ring0_waits = []
+        self.gpu_freq = 0
+
+    def add_event(self, ev):
+        self.events.append(ev)
+
+        if ev.function == "drm_vblank_event":
+            self._parse_drm_vblank_event(ev)
+        if ev.function == "i915_gem_request_add":
+            self._parse_i915_gem_request_add(ev)
+        elif ev.function == "i915_gem_request_complete":
+            self._parse_i915_gem_request_complete(ev)
+        elif ev.function == "i915_gem_request_wait_begin":
+            self._parse_i915_gem_request_wait_begin(ev)
+        elif ev.function == "i915_gem_request_wait_end":
+            self._parse_i915_gem_request_wait_end(ev)
+        elif ev.function == "intel_gpu_freq_change":
+            self._parse_intel_gpu_freq_change(ev)
+
+    def _parse_drm_vblank_event(self, ev):
+        print("%.3f: -------- VBLANK --------" % ev.timestamp)
+
+    def _parse_i915_gem_request_add(self, ev):
+        if ev.d['ring'] != 0:
+            return
+
+        self.ring0_actives.append(ev)
+
+        print("%.3f: new request by %s, seqno %d, total active %d" % (
+            ev.timestamp, ev.task, ev.d['seqno'], len(self.ring0_actives)))
+
+    def _parse_i915_gem_request_complete(self, ev):
+        if ev.d['ring'] != 0:
+            return
+
+        if self.ring0_ev:
+            gpu_time = ev.timestamp - self.ring0_ev.timestamp
+        else:
+            gpu_time = ev.timestamp - self.events[0].timestamp
+
+        self.ring0_ev = ev
+
+        durations = []
+        for active in self.ring0_actives:
+            if active.d['seqno'] <= ev.d['seqno']:
+                wall_time = ev.timestamp - active.timestamp
+                if gpu_time > wall_time:
+                    gpu_time = wall_time
+
+                durations.append("req %d gpu %.3fms wall %.3fms" %
+                        (active.d['seqno'], gpu_time, wall_time))
+                self.ring0_actives.remove(active)
+            else:
+                break
+
+        print("%.3f: ring seqno %d, total active %d (%s)" % (
+            ev.timestamp, ev.d['seqno'], len(self.ring0_actives),
+            ", ".join(durations)))
+
+    def _parse_i915_gem_request_wait_begin(self, ev):
+        if ev.d['ring'] != 0:
+            return
+
+        self.ring0_waits.append(ev)
+
+        task = "???"
+        for active in self.ring0_actives:
+            if active.d['seqno'] == ev.d['seqno']:
+                task = active.task
+                break
+
+        print("%.3f: %s waiting for seqno %d by %s" %
+                (ev.timestamp, ev.task, ev.d['seqno'], task))
+
+    def _parse_i915_gem_request_wait_end(self, ev):
+        if ev.d['ring'] != 0:
+            return
+
+        for wait in self.ring0_waits:
+            if wait.d['seqno'] == ev.d['seqno']:
+                print("%.3f: %s waited for seqno %d for %.3fms" %
+                        (ev.timestamp, ev.task, ev.d['seqno'],
+                            ev.timestamp - wait.timestamp))
+                self.ring0_waits.remove(wait)
+                break
+
+    def _parse_intel_gpu_freq_change(self, ev):
+        if self.gpu_freq != ev.d['new_freq']:
+            self.gpu_freq = ev.d['new_freq']
+            print("%.3f: GPU @ %dMHz" % (ev.timestamp, ev.d['new_freq']))
+
+def main():
+    view = GPUView()
+    with open(sys.argv[1], "r") as fp:
+        for line in fp:
+            if line[0] == '#':
+                continue
+            view.add_event(Event(line.strip()))
+
+if __name__ == "__main__":
+    main()
