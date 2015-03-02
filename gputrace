@@ -32,8 +32,9 @@ class Event(object):
                 "i915_gem_request_add": self._parse_cski,
                 "i915_gem_request_complete": self._parse_cski,
                 "i915_gem_request_retire": self._parse_cski,
-                "i915_gem_request_wait_begin": self._parse_i915_request_wait_begin,
+                "i915_gem_request_wait_begin": self._parse_i915_gem_request_wait_begin,
                 "i915_gem_request_wait_end": self._parse_cski,
+                "i915_gem_evict": self._parse_i915_gem_evict,
                 "i915_flip_request": self._parse_i915_flip,
                 "i915_flip_complete": self._parse_i915_flip,
                 "i915_ring_wait_begin": self._parse_cski,
@@ -50,7 +51,7 @@ class Event(object):
             k, v = kv.split("=", 1)
             self.d[k] = int(v)
 
-    def _parse_i915_request_wait_begin(self):
+    def _parse_i915_gem_request_wait_begin(self):
         entries = self.raw_data.split(", ")
         for kv in entries:
             k, v = kv.split("=", 1)
@@ -58,6 +59,17 @@ class Event(object):
                 self.d[k] = (v == "no")
             else:
                 self.d[k] = int(v)
+
+    def _parse_i915_gem_evict(self):
+        self.d['mappable]'] = False
+
+        entries = self.raw_data.split(", ")
+        for kv in entries:
+            splitted = kv.split("=", 1)
+            if splitted[0] == "mappable":
+                self.d[splitted[0]] = 1
+            else:
+                self.d[splitted[0]] = int(splitted[1])
 
     def _parse_i915_flip(self):
         """Parse comma-separated key-int pairs."""
@@ -95,6 +107,8 @@ class GPUView(object):
             self._parse_i915_gem_request_wait_begin(ev)
         elif ev.function == "i915_gem_request_wait_end":
             self._parse_i915_gem_request_wait_end(ev)
+        elif ev.function == "i915_gem_evict":
+            self._parse_i915_gem_evict(ev)
         elif ev.function == "intel_gpu_freq_change":
             self._parse_intel_gpu_freq_change(ev)
 
@@ -164,6 +178,10 @@ class GPUView(object):
                             ev.timestamp - wait.timestamp))
                 self.ring0_waits.remove(wait)
                 break
+
+    def _parse_i915_gem_evict(self, ev):
+        print("%.3f: EVICT size %d by %s" %
+                (ev.timestamp, ev.d['size'], ev.task))
 
     def _parse_intel_gpu_freq_change(self, ev):
         if self.gpu_freq != ev.d['new_freq']:
