@@ -94,6 +94,9 @@ class GPUView(object):
         self.ring0_waits = []
         self.gpu_freq = 0
 
+        self.gpu_idle = 0.0
+        self.ring0_idle_ev = None
+
     def add_event(self, ev):
         self.events.append(ev)
 
@@ -120,6 +123,10 @@ class GPUView(object):
             return
 
         self.ring0_actives.append(ev)
+
+        if self.ring0_idle_ev:
+            self.gpu_idle += ev.timestamp - self.ring0_idle_ev.timestamp
+            self.ring0_idle_ev = None
 
         print("%.3f: new request by %s, seqno %d, total active %d" % (
             ev.timestamp, ev.task, ev.d['seqno'], len(self.ring0_actives)))
@@ -151,6 +158,8 @@ class GPUView(object):
             return
 
         self.ring0_actives = self.ring0_actives[len(durations):]
+        if not self.ring0_actives:
+            self.ring0_idle_ev = ev
 
         print("%.3f: ring seqno %d, total active %d (%s)" % (
             ev.timestamp, ev.d['seqno'], len(self.ring0_actives),
@@ -199,6 +208,8 @@ def main():
             if line[0] == '#':
                 continue
             view.add_event(Event(line.strip()))
+
+    print("GPU idled for %.3fms" % view.gpu_idle)
 
 if __name__ == "__main__":
     main()
