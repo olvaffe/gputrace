@@ -137,16 +137,20 @@ class GPUView(object):
 
         durations = []
         for active in self.ring0_actives:
-            if active.d['seqno'] <= ev.d['seqno']:
-                wall_time = ev.timestamp - active.timestamp
-                if gpu_time > wall_time:
-                    gpu_time = wall_time
-
-                durations.append("req %d gpu %.3fms wall %.3fms" %
-                        (active.d['seqno'], gpu_time, wall_time))
-                self.ring0_actives.remove(active)
-            else:
+            if active.d['seqno'] > ev.d['seqno']:
                 break
+
+            wall_time = ev.timestamp - active.timestamp
+            if gpu_time > wall_time:
+                gpu_time = wall_time
+
+            durations.append("req %d gpu %.3fms wall %.3fms" %
+                    (active.d['seqno'], gpu_time, wall_time))
+
+        if not durations:
+            return
+
+        self.ring0_actives = self.ring0_actives[len(durations):]
 
         print("%.3f: ring seqno %d, total active %d (%s)" % (
             ev.timestamp, ev.d['seqno'], len(self.ring0_actives),
